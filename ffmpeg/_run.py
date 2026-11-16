@@ -8,6 +8,7 @@ import operator
 import subprocess
 
 from ._ffmpeg import input, output
+from ._perf import StageTimer, resolve_executable
 from .nodes import (
     get_stream_spec_nodes,
     FilterNode,
@@ -30,6 +31,16 @@ class Error(Exception):
         )
         self.stdout = stdout
         self.stderr = stderr
+
+
+def _resolve_command(cmd):
+    """Resolve each executable in a ``cmd`` value through the PATH cache."""
+    if isinstance(cmd, basestring):
+        return resolve_executable(cmd)
+    resolved = list(cmd)
+    if resolved:
+        resolved[0] = resolve_executable(resolved[0])
+    return resolved
 
 
 def _get_input_args(input_node):
@@ -202,6 +213,8 @@ def run_async(
     quiet=False,
     overwrite_output=False,
     cwd=None,
+    timeline=None,
+    resolve_cmd=False,
 ):
     """Asynchronously invoke ffmpeg for the supplied node graph.
 
@@ -280,20 +293,30 @@ def run_async(
 
     .. _subprocess Popen: https://docs.python.org/3/library/subprocess.html#popen-objects
     """
-    args = compile(stream_spec, cmd, overwrite_output=overwrite_output)
+    timer = StageTimer(timeline)
+    with timer.stage('compile'):
+        args = compile(stream_spec, cmd, overwrite_output=overwrite_output)
+    # Optionally resolve the executable once (cached across a batch) instead
+    # of making Popen repeat a PATH lookup on every single transcode.  Off by
+    # default so the historical argv/Popen behaviour is unchanged unless the
+    # caller opts in.
+    if resolve_cmd:
+        with timer.stage('resolve_executable'):
+            args = _resolve_command(args)
     stdin_stream = subprocess.PIPE if pipe_stdin else None
     stdout_stream = subprocess.PIPE if pipe_stdout else None
     stderr_stream = subprocess.PIPE if pipe_stderr else None
     if quiet:
         stderr_stream = subprocess.STDOUT
         stdout_stream = subprocess.DEVNULL
-    return subprocess.Popen(
-        args,
-        stdin=stdin_stream,
-        stdout=stdout_stream,
-        stderr=stderr_stream,
-        cwd=cwd,
-    )
+    with timer.stage('popen_spawn'):
+        return subprocess.Popen(
+            args,
+            stdin=stdin_stream,
+            stdout=stdout_stream,
+            stderr=stderr_stream,
+            cwd=cwd,
+        )
 
 
 @output_operator()
@@ -306,6 +329,8 @@ def run(
     quiet=False,
     overwrite_output=False,
     cwd=None,
+    timeline=None,
+    resolve_cmd=False,
 ):
     """Invoke ffmpeg for the supplied node graph.
 
@@ -321,17 +346,22 @@ def run(
 
     Returns: (out, err) tuple containing captured stdout and stderr data.
     """
-    process = run_async(
-        stream_spec,
-        cmd,
-        pipe_stdin=input is not None,
-        pipe_stdout=capture_stdout,
-        pipe_stderr=capture_stderr,
-        quiet=quiet,
-        overwrite_output=overwrite_output,
-        cwd=cwd,
-    )
-    out, err = process.communicate(input)
+    timer = StageTimer(timeline)
+    with timer.stage('run_async'):
+        process = run_async(
+            stream_spec,
+            cmd,
+            pipe_stdin=input is not None,
+            pipe_stdout=capture_stdout,
+            pipe_stderr=capture_stderr,
+            quiet=quiet,
+            overwrite_output=overwrite_output,
+            cwd=cwd,
+            timeline=timeline,
+            resolve_cmd=resolve_cmd,
+        )
+    with timer.stage('communicate'):
+        out, err = process.communicate(input)
     retcode = process.poll()
     if retcode:
         raise Error('ffmpeg', out, err)

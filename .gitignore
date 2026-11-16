@@ -6,3 +6,7 @@ ffmpeg/tests/sample_data/out*.mp4
 ffmpeg_python.egg-info/
 venv*
 build/
+benchmarks/media/
+benchmarks/perf_archive/
+*.pstats
+__pycache__/
