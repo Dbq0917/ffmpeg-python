@@ -287,13 +287,22 @@ def run_async(
     if quiet:
         stderr_stream = subprocess.STDOUT
         stdout_stream = subprocess.DEVNULL
-    return subprocess.Popen(
+    process = subprocess.Popen(
         args,
         stdin=stdin_stream,
         stdout=stdout_stream,
         stderr=stderr_stream,
         cwd=cwd,
     )
+    try:
+        # Keep initialization counts visible for callers that use the existing
+        # run_async/Popen interface rather than open_stream().
+        from ._stream import record_process_start
+
+        record_process_start(stream_spec)
+    except Exception:
+        pass
+    return process
 
 
 @output_operator()

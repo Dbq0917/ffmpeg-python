@@ -35,6 +35,49 @@ import ffmpeg
 )
 ```
 
+## Persistent chunked reads
+
+`run_async(pipe_stdout=True)` already starts one ffmpeg process, but code that
+calls it once per chunk starts a new process (and new decoders) for every
+chunk.  Use `open_stream` when reading a long file in fixed-size blocks:
+
+```python
+stream = (
+    ffmpeg
+    .input('long-audio.wav')
+    .output('pipe:', format='s16le', acodec='pcm_s16le', ac=1, ar=16000)
+)
+
+with ffmpeg.open_stream(stream) as reader:
+    while True:
+        chunk = reader.read(64 * 1024)
+        if not chunk:
+            break
+        consume(chunk)
+```
+
+The ffmpeg process is opened once.  `read(size)` returns the same `bytes` you
+would get from `Popen.stdout.read(size)`, in the same order as a one-shot
+read, and allocates at most `size` bytes.  Existing output streams also expose
+the same persistent reader through `stream.read(size)`, `stream.open()`,
+`stream.cancel()` and `stream.close()`.
+
+`reader.position` reports the number of bytes successfully returned, and
+`reader.initializations` / `reader.decoder_creations` stay at `1` for a normal
+single-input stream.  Process-wide counters are available from
+`ffmpeg.stream_metrics.snapshot()` and every initialization is logged, so a
+regression that reopens the stream per chunk is visible in monitoring:
+
+```python
+>>> ffmpeg.stream_metrics.snapshot()
+{'initializations': 1, 'decoder_creations': 1, 'read_calls': 2400, ...}
+```
+
+If decoding fails after some output was produced, `ffmpeg.StreamReadError`
+carries `position` (and its alias `offset`), `chunk_start`, `returncode` and
+the tail of ffmpeg's stderr.  `reader.cancel()` terminates and reaps the
+process even if another thread is blocked in `read()`.
+
 ## [API reference](https://kkroening.github.io/ffmpeg-python/)
 
 ## Complex filter graphs
